@@ -87,7 +87,7 @@ app.post("/logout", (req, res) => {
 
 const fetchLiveQuote = async (symbol) => {
   try {
-    const formattedSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
+    const formattedSymbol = symbol.toUpperCase();
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${formattedSymbol}?interval=1d&range=1d`;
 
     const { data } = await axios.get(targetUrl, {
