@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'; 
 import io from 'socket.io-client';
-import { api } from '../config/api';
-
+import { api, apiUrl } from '../config/api';
 import TradeModal from '../components/TradeModal';
 import StockChart from '../components/StockChart';
 
@@ -35,8 +34,7 @@ export default function MarketView() {
   const [isAiLoading, setIsAiLoading] = useState(false);
 
   useEffect(() => {
-    socketRef.current = io(import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000', { withCredentials: true });
-
+    socketRef.current = io(apiUrl(""), { withCredentials: true });
     socketRef.current.on('connect', () => {
       console.log('WebSocket Connection Established');
     });

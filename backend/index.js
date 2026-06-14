@@ -24,9 +24,16 @@ dotenv.config();
 
 const PORT = process.env.PORT || 4000;
 const url = process.env.MONGO_URL;
-const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 const app = express();
 const server = http.createServer(app);
+yahooFinance.suppressNotices(['yahooSurvey']);
+yahooFinance.setGlobalConfig({
+  requestOptions: {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+  }
+});
 
 const allowedOrigins = [
   "http://localhost:5173", 
