@@ -5,11 +5,10 @@ import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import axios from "axios";
-import yahooFinance from 'yahoo-finance2';
 import http from "http";
 import { Server } from "socket.io";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-
+import yf from 'yahoo-finance2';
 
 //Models and Controllers
 import { HoldingsModel } from "./model/HoldingsModel.js";
@@ -26,6 +25,9 @@ const PORT = process.env.PORT || 4000;
 const url = process.env.MONGO_URL;
 const app = express();
 const server = http.createServer(app);
+const yahooFinance = yf.default || yf;
+
+
 yahooFinance.suppressNotices(['yahooSurvey']);
 yahooFinance.setGlobalConfig({
   requestOptions: {
