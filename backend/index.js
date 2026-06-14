@@ -44,8 +44,8 @@ app.use(
     origin: allowedOrigins, 
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
-  })
-);
+  }
+));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -85,9 +85,16 @@ app.post("/logout", (req, res) => {
   res.status(200).json({ success: true, message: "Logged out successfully" });
 });
 
+// CORE LIVE QUOTE FETCH ENGINE (WITH DYNAMIC FX CONVERSION)
 const fetchLiveQuote = async (symbol) => {
   try {
-    const formattedSymbol = symbol.toUpperCase();
+    let formattedSymbol = symbol.toUpperCase();
+    
+    const legacyIndianStocks = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ITC', 'SBIN', 'BHARTIARTL', 'HINDUNILVR'];
+    if (legacyIndianStocks.includes(formattedSymbol)) {
+      formattedSymbol = `${formattedSymbol}.NS`;
+    }
+
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${formattedSymbol}?interval=1d&range=1d`;
 
     const { data } = await axios.get(targetUrl, {
@@ -95,15 +102,36 @@ const fetchLiveQuote = async (symbol) => {
     });
 
     const result = data.chart.result[0];
-    const price = result.meta.regularMarketPrice;
-    const previousClose = result.meta.chartPreviousClose || price;
+    const meta = result.meta;
+    let price = meta.regularMarketPrice;
+    let previousClose = meta.chartPreviousClose || price;
+
+    let wasConverted = false;
+    
+    if (meta.currency && meta.currency !== 'INR') {
+      const fxTicker = `${meta.currency}INR=X`;
+      try {
+        const fxResponse = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${fxTicker}?interval=1d&range=1d`, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+        });
+        const liveRate = fxResponse.data.chart.result[0].meta.regularMarketPrice;
+        if (liveRate) {
+          price = price * liveRate;
+          previousClose = previousClose * liveRate;
+          wasConverted = true;
+        }
+      } catch (fxError) {
+        console.error(`FX pipeline routing failure for pair ${fxTicker}:`, fxError.message);
+      }
+    }
+
     const change = price - previousClose;
     const changePercent = previousClose ? (change / previousClose) * 100 : 0;
 
-    return { price, change, changePercent };
+    return { price, change, changePercent, wasConverted };
   } catch (error) {
     console.error(`Axios Bypass Error for ${symbol}:`, error.message);
-    return { price: 0, change: 0, changePercent: 0 };
+    return { price: 0, change: 0, changePercent: 0, wasConverted: false };
   }
 };
 
@@ -120,14 +148,14 @@ app.get("/api/market/quote/:symbol", requireAuth, async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        symbol: symbol,
-        name: symbol,
+        symbol: symbol.toUpperCase(),
+        name: symbol.toUpperCase(),
         price: liveData.price,
         change: liveData.change,
         changePercent: liveData.changePercent,
-        exchange: "NSE",
+        exchange: symbol.toUpperCase().endsWith(".NS") ? "NSE" : "GLOBAL",
         currency: 'INR',
-        wasConverted: false 
+        wasConverted: liveData.wasConverted 
       }
     });
   } catch (error) {
@@ -160,11 +188,17 @@ app.get("/api/market/search/:query", requireAuth, async (req, res) => {
   }
 });
 
-// GET HISTORICAL DATA (For Charts)
+// GET HISTORICAL DATA (For Charts with dynamic INR Multipliers)
 app.get("/api/market/history/:symbol", requireAuth, async (req, res) => {
   try {
     const { symbol } = req.params;
-    const formattedSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
+    let formattedSymbol = symbol.toUpperCase();
+    
+    const legacyIndianStocks = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ITC', 'SBIN', 'BHARTIARTL', 'HINDUNILVR'];
+    if (legacyIndianStocks.includes(formattedSymbol)) {
+      formattedSymbol = `${formattedSymbol}.NS`;
+    }
+
     const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${formattedSymbol}?interval=1d&range=1mo`;
 
     const { data } = await axios.get(targetUrl, {
@@ -172,12 +206,30 @@ app.get("/api/market/history/:symbol", requireAuth, async (req, res) => {
     });
 
     const result = data.chart.result[0];
+    const meta = result.meta;
     const timestamps = result.timestamp || [];
     const closePrices = result.indicators.quote[0].close || [];
 
+    let dynamicConversionRate = 1;
+
+    if (meta.currency && meta.currency !== 'INR') {
+      const fxTicker = `${meta.currency}INR=X`;
+      try {
+        const fxResponse = await axios.get(`https://query1.finance.yahoo.com/v8/finance/chart/${fxTicker}?interval=1d&range=1d`, {
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+        });
+        const liveRate = fxResponse.data.chart.result[0].meta.regularMarketPrice;
+        if (liveRate) {
+          dynamicConversionRate = liveRate;
+        }
+      } catch (fxError) {
+        console.error(`Historical conversion layer lock fail for currency pairs ${fxTicker}`);
+      }
+    }
+
     const chartData = timestamps.map((time, index) => ({
       date: new Date(time * 1000).toISOString().split('T')[0],
-      price: closePrices[index] || 0
+      price: (closePrices[index] || 0) * dynamicConversionRate
     })).filter(day => day.price > 0);
 
     res.status(200).json({ success: true, data: chartData });
@@ -470,7 +522,7 @@ app.get("/api/market/analyze/:symbol", requireAuth, async (req, res) => {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
     const prompt = `
       You are an expert, professional financial analyst. A user is looking at the stock ${symbol}.
-      Current Price: ₹${liveData.price}.
+      Current Price: ₹${liveData.price.toFixed(2)}.
       Daily Change: ${liveData.changePercent.toFixed(2)}%.
       
       Provide a concise, 3-to-4 sentence summary analyzing this current market movement. 
@@ -487,7 +539,7 @@ app.get("/api/market/analyze/:symbol", requireAuth, async (req, res) => {
   }
 });
 
-// server listening
+// SERVER AND DB BOOTSTRAP
 server.listen(PORT, async () => {
   console.log(`Listening on port ${PORT}!`);
   try {
