@@ -8,7 +8,6 @@ import axios from "axios";
 import http from "http";
 import { Server } from "socket.io";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import yf from 'yahoo-finance2';
 
 //Models and Controllers
 import { HoldingsModel } from "./model/HoldingsModel.js";
@@ -25,17 +24,6 @@ const PORT = process.env.PORT || 4000;
 const url = process.env.MONGO_URL;
 const app = express();
 const server = http.createServer(app);
-const yahooFinance = yf.default || yf;
-
-
-yahooFinance.suppressNotices(['yahooSurvey']);
-yahooFinance.setGlobalConfig({
-  requestOptions: {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-  }
-});
 
 const allowedOrigins = [
   "http://localhost:5173", 
@@ -49,6 +37,7 @@ const io = new Server(server, {
     credentials: true,
   }
 });
+
 // MIDDLEWARE CONFIGURATION
 app.use(
   cors({
@@ -64,11 +53,9 @@ app.use(cookieParser());
 //AUTHENTICATION MIDDLEWARE
 const requireAuth = async (req, res, next) => {
   const token = req.cookies.token;
-
   if (!token) {
     return res.status(401).json({ success: false, message: "No token, authorization denied" });
   }
-
   try {
     const decoded = jwt.verify(token, process.env.TOKEN_KEY);
     req.user = await UserModel.findById(decoded.id).select('-password');
@@ -101,20 +88,105 @@ app.post("/logout", (req, res) => {
 const fetchLiveQuote = async (symbol) => {
   try {
     const formattedSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
-    const quote = await yahooFinance.quote(formattedSymbol);
+    const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${formattedSymbol}?interval=1d&range=1d`;
 
-    if (quote && quote.regularMarketPrice) {
-      return { 
-        price: quote.regularMarketPrice, 
-        change: quote.regularMarketChangePercent 
-      }; 
-    }
-    return { price: 0, change: 0 };
+    const { data } = await axios.get(targetUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+
+    const result = data.chart.result[0];
+    const price = result.meta.regularMarketPrice;
+    const previousClose = result.meta.chartPreviousClose || price;
+    const change = price - previousClose;
+    const changePercent = previousClose ? (change / previousClose) * 100 : 0;
+
+    return { price, change, changePercent };
   } catch (error) {
-    console.error(`Yahoo API Error for ${symbol}:`, error.message);
-    return { price: 0, change: 0 };
+    console.error(`Axios Bypass Error for ${symbol}:`, error.message);
+    return { price: 0, change: 0, changePercent: 0 };
   }
 };
+
+// LIVE MARKET QUOTE
+app.get("/api/market/quote/:symbol", requireAuth, async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const liveData = await fetchLiveQuote(symbol);
+
+    if (!liveData || liveData.price === 0) {
+      return res.status(404).json({ success: false, message: "Stock not found or blocked." });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        symbol: symbol,
+        name: symbol,
+        price: liveData.price,
+        change: liveData.change,
+        changePercent: liveData.changePercent,
+        exchange: "NSE",
+        currency: 'INR',
+        wasConverted: false 
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch market data." });
+  }
+});
+
+// LIVE MARKET SEARCH
+app.get("/api/market/search/:query", requireAuth, async (req, res) => {
+  try {
+    const { query } = req.params;
+    const targetUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${query}`;
+    
+    const { data } = await axios.get(targetUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+
+    const stocks = data.quotes
+      .filter(q => q.quoteType === 'EQUITY' || q.quoteType === 'ETF')
+      .slice(0, 6)
+      .map(q => ({
+        symbol: q.symbol,
+        name: q.shortname || q.longname || q.symbol,
+        exchange: q.exchDisp || "Global Exchange" 
+      }));
+
+    res.status(200).json({ success: true, data: stocks });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Search failed" });
+  }
+});
+
+// GET HISTORICAL DATA (For Charts)
+app.get("/api/market/history/:symbol", requireAuth, async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const formattedSymbol = symbol.endsWith(".NS") ? symbol : `${symbol}.NS`;
+    const targetUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${formattedSymbol}?interval=1d&range=1mo`;
+
+    const { data } = await axios.get(targetUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
+
+    const result = data.chart.result[0];
+    const timestamps = result.timestamp || [];
+    const closePrices = result.indicators.quote[0].close || [];
+
+    const chartData = timestamps.map((time, index) => ({
+      date: new Date(time * 1000).toISOString().split('T')[0],
+      price: closePrices[index] || 0
+    })).filter(day => day.price > 0);
+
+    res.status(200).json({ success: true, data: chartData });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch chart data" });
+  }
+});
+
+// PORTFOLIO AND WATCHLIST ROUTES
 app.get("/api/market/all-stocks", requireAuth, async (req, res) => {
   const staticStocks = [
     { symbol: 'RELIANCE', name: 'Reliance Industries' },
@@ -131,11 +203,7 @@ app.get("/api/market/all-stocks", requireAuth, async (req, res) => {
     const liveMarket = await Promise.all(
       staticStocks.map(async (stock) => {
         const liveData = await fetchLiveQuote(stock.symbol);
-        return {
-          ...stock,
-          price: liveData.price || 0,
-          change: liveData.change || 0 
-        };
+        return { ...stock, price: liveData.price || 0, change: liveData.change || 0 };
       })
     );
     res.status(200).json(liveMarket);
@@ -144,7 +212,6 @@ app.get("/api/market/all-stocks", requireAuth, async (req, res) => {
   }
 });
 
-// Saved watchlist
 app.get("/api/watchlist", requireAuth, async (req, res) => {
   try {
     const watchlist = await WatchlistModel.find({ user: req.user._id });
@@ -154,14 +221,11 @@ app.get("/api/watchlist", requireAuth, async (req, res) => {
   }
 });
 
-// Add a stock to the watchlist
 app.post("/api/watchlist", requireAuth, async (req, res) => {
   const { symbol, name } = req.body;
   try {
     const exists = await WatchlistModel.findOne({ user: req.user._id, symbol });
-    if (exists) {
-      return res.status(400).json({ success: false, message: "Stock is already in your watchlist" });
-    }
+    if (exists) return res.status(400).json({ success: false, message: "Stock is already in your watchlist" });
 
     const newItem = new WatchlistModel({ user: req.user._id, symbol, name });
     await newItem.save();
@@ -171,7 +235,6 @@ app.post("/api/watchlist", requireAuth, async (req, res) => {
   }
 });
 
-// Remove a stock from the watchlist
 app.delete("/api/watchlist/:symbol", requireAuth, async (req, res) => {
   try {
     await WatchlistModel.deleteOne({ user: req.user._id, symbol: req.params.symbol });
@@ -181,54 +244,28 @@ app.delete("/api/watchlist/:symbol", requireAuth, async (req, res) => {
   }
 });
 
-app.get("/api/market/all-stocks", requireAuth, (req, res) => {
-  const marketStocks = [
-    { symbol: 'RELIANCE', name: 'Reliance Industries' },
-    { symbol: 'TCS', name: 'Tata Consultancy Services' },
-    { symbol: 'INFY', name: 'Infosys Limited' },
-    { symbol: 'HDFCBANK', name: 'HDFC Bank' },
-    { symbol: 'ITC', name: 'ITC Limited' },
-    { symbol: 'SBIN', name: 'State Bank of India' },
-    { symbol: 'BHARTIARTL', name: 'Bharti Airtel' },
-    { symbol: 'HINDUNILVR', name: 'Hindustan Unilever' },
-  ];
-  res.status(200).json(marketStocks);
-});
-
 app.get("/api/portfolio/my-holdings", requireAuth, async (req, res) => {
   try {
     let myHoldings = await HoldingsModel.find({ user: req.user._id });
-
     const liveUpdatedHoldings = await Promise.all(
       myHoldings.map(async (holding) => {
-
         const tickerToFetch = holding.symbol || holding.name; 
         const liveData = await fetchLiveQuote(tickerToFetch);
-        const currentLivePrice = liveData.price;
-
-        if (currentLivePrice && currentLivePrice !== holding.price) {
-          holding.price = currentLivePrice;
+        if (liveData.price > 0 && liveData.price !== holding.price) {
+          holding.price = liveData.price;
           await holding.save();
         }
-
         return {
-          _id: holding._id,
-          symbol: holding.symbol,
-          name: holding.name,
-          qty: holding.qty,
-          avg: holding.avg,
-          price: holding.price 
+          _id: holding._id, symbol: holding.symbol, name: holding.name,
+          qty: holding.qty, avg: holding.avg, price: holding.price 
         };
       })
     );
-
     res.status(200).json(liveUpdatedHoldings);
   } catch (error) {
-    console.error("Error in portfolio data engine:", error);
     res.status(500).json({ success: false, message: "Server error fetching live holdings" });
   }
-});;
-
+});
 
 app.post("/api/portfolio/trade", requireAuth, async (req, res) => {
   try {
@@ -240,93 +277,59 @@ app.post("/api/portfolio/trade", requireAuth, async (req, res) => {
     const totalTradeValue = parsedQty * parsedPrice;
 
     const user = await UserModel.findById(userId);
-
     let existingHolding = await HoldingsModel.findOne({ user: userId, symbol: symbol });
 
-    // THE LIMIT ORDER INTERCEPTOR
     if (orderType === 'LIMIT') {
       const parsedTarget = Number(targetPrice);
-      
       if (action === 'BUY' && user.virtualFunds < (parsedQty * parsedTarget)) {
-         return res.status(400).json({ success: false, message: "Trade Rejected: Insufficient virtual funds for this limit order." });
+         return res.status(400).json({ success: false, message: "Trade Rejected: Insufficient virtual funds." });
       }
-      
       if (action === 'SELL' && (!existingHolding || existingHolding.qty < parsedQty)) {
-         return res.status(400).json({ success: false, message: `Trade Rejected: You don't have enough shares of ${symbol} to sell.` });
+         return res.status(400).json({ success: false, message: "Trade Rejected: Not enough shares to sell." });
       }
 
       const newPendingOrder = new PendingOrderModel({
-        user: userId,
-        symbol: symbol,
-        name: name || symbol,
-        qty: parsedQty,
-        action: action,
-        targetPrice: parsedTarget
+        user: userId, symbol: symbol, name: name || symbol, qty: parsedQty, action: action, targetPrice: parsedTarget
       });
       await newPendingOrder.save();
 
       globalOrderBook.addOrder({
-        dbId: newPendingOrder._id,
-        user: userId,
-        symbol: symbol,
-        name: name || symbol,
-        qty: parsedQty,
-        action: action,
-        targetPrice: parsedTarget
+        dbId: newPendingOrder._id, user: userId, symbol: symbol, name: name || symbol,
+        qty: parsedQty, action: action, targetPrice: parsedTarget
       });
-
-      return res.status(200).json({ 
-        success: true, 
-        message: `Limit ${action} Order successfully queued at ₹${parsedTarget}!` 
-      });
+      return res.status(200).json({ success: true, message: `Limit ${action} Order successfully queued!` });
     }
 
-    // STANDARD MARKET ORDER EXECUTION
     if (action === 'BUY') {
       if (user.virtualFunds < totalTradeValue) {
         return res.status(400).json({ success: false, message: "Trade Rejected: Insufficient virtual funds." });
       }
-
       user.virtualFunds -= totalTradeValue;
       await user.save();
 
       if (existingHolding) {
         const previousTotalInvested = existingHolding.qty * existingHolding.avg;
-        const newTotalInvested = previousTotalInvested + totalTradeValue;
-        
         existingHolding.qty += parsedQty;
-        existingHolding.avg = newTotalInvested / existingHolding.qty;
-        
+        existingHolding.avg = (previousTotalInvested + totalTradeValue) / existingHolding.qty;
         if (!existingHolding.name || existingHolding.name === existingHolding.symbol) {
             existingHolding.name = name;
         }
         await existingHolding.save();
       } else {
         const newHolding = new HoldingsModel({
-          user: userId,
-          symbol: symbol,
-          name: name || symbol,
-          qty: parsedQty,
-          avg: parsedPrice,
-          price: parsedPrice
+          user: userId, symbol: symbol, name: name || symbol, qty: parsedQty, avg: parsedPrice, price: parsedPrice
         });
         await newHolding.save();
       }
     }
 
     if (action === 'SELL') {
-      if (!existingHolding) {
-        return res.status(400).json({ success: false, message: `Trade Rejected: You do not own ${symbol}.` });
+      if (!existingHolding || existingHolding.qty < parsedQty) {
+        return res.status(400).json({ success: false, message: "Trade Rejected: Invalid sell request." });
       }
-      if (existingHolding.qty < parsedQty) {
-        return res.status(400).json({ success: false, message: `Trade Rejected: You only have ${existingHolding.qty} shares to sell.` });
-      }
-
       user.virtualFunds += totalTradeValue;
       await user.save();
-
       existingHolding.qty -= parsedQty;
-
       if (existingHolding.qty === 0) {
         await HoldingsModel.findByIdAndDelete(existingHolding._id);
       } else {
@@ -335,216 +338,13 @@ app.post("/api/portfolio/trade", requireAuth, async (req, res) => {
     }
 
     const newOrder = new OrdersModel({
-      user: userId,
-      name: name || symbol,
-      qty: parsedQty,
-      price: parsedPrice,
-      mode: action
+      user: userId, name: name || symbol, qty: parsedQty, price: parsedPrice, mode: action
     });
     await newOrder.save();
-
     res.status(200).json({ success: true, message: "Market Trade executed successfully!" });
 
   } catch (error) {
-    console.error("Trade Engine Error:", error);
     res.status(500).json({ success: false, message: "Server error during trade execution." });
-  }
-});
-
-// LEGACY ROUTES
-app.get("/allPositions", requireAuth, async (req, res) => {
-  try {
-    let allPositions = await PositionsModel.find({});
-    res.json(allPositions);
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-});
-
-app.post("/newOrder", requireAuth, async (req, res) => {
-  try {
-    let newOrder = new OrdersModel({
-      name: req.body.name,
-      qty: req.body.qty,
-      price: req.body.price,
-      mode: req.body.mode,
-    });
-    await newOrder.save();
-    res.status(201).json({ success: true, message: "Order saved!" });
-  } catch (error) {
-    res.status(500).json({ success: false, message: "Failed to save order" });
-  }
-});
-
-// LIVE MARKET DATA ENGINE
-app.get("/api/market/quote/:symbol", requireAuth, async (req, res) => {
-  try {
-    const { symbol } = req.params;
-    const quote = await yahooFinance.quote(symbol);
-
-    if (!quote) {
-      return res.status(404).json({ success: false, message: "Stock not found." });
-    }
-
-    let finalPrice = quote.regularMarketPrice;
-    let finalChange = quote.regularMarketChange;
-    let isConverted = false;
-
-    // FOREX ENGINE: If the stock is NOT in INR, fetch the live exchange rate and convert it
-    if (quote.currency && quote.currency !== 'INR') {
-      try {
-        const forexPair = `${quote.currency}INR=X`;
-        const forexQuote = await yahooFinance.quote(forexPair);
-        const conversionRate = forexQuote.regularMarketPrice;
-
-        finalPrice = finalPrice * conversionRate;
-        finalChange = finalChange * conversionRate;
-        isConverted = true;
-      } catch (err) {
-        console.error("Forex conversion failed, falling back to native currency.");
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        symbol: quote.symbol,
-        name: quote.shortName || quote.longName || symbol,
-        price: finalPrice,
-        change: finalChange,
-        changePercent: quote.regularMarketChangePercent,
-        exchange: quote.fullExchangeName || "Global Market",
-        currency: 'INR',
-        wasConverted: isConverted 
-      }
-    });
-
-  } catch (error) {
-    console.error(`Quote Error for ${req.params.symbol}:`, error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch market data." });
-  }
-});
-
-// LIVE MARKET SEARCH
-
-app.get("/api/market/search/:query", requireAuth, async (req, res) => {
-  try {
-    const { query } = req.params;
-    const result = await yahooFinance.search(query);
-
-    const stocks = result.quotes
-      .filter(q => q.isYahooFinance)
-      .slice(0, 6)
-      .map(q => ({
-        symbol: q.symbol,
-        name: q.shortname || q.longname || q.symbol,
-        exchange: q.exchDisp || "Global Exchange" 
-      }));
-
-    res.status(200).json({ success: true, data: stocks });
-  } catch (error) {
-    console.error("Search API Error:", error.message);
-    res.status(500).json({ success: false, message: "Search failed" });
-  }
-});
-
-// GET HISTORICAL DATA (For Interactive Charts)
-app.get("/api/market/history/:symbol", requireAuth, async (req, res) => {
-  try {
-    const { symbol } = req.params;
-    
-    const period2 = new Date(); // Today
-    const period1 = new Date();
-    period1.setDate(period1.getDate() - 30); // 30 days ago
-
-    const queryOptions = { period1, period2, interval: '1d' };
-    
-    const result = await yahooFinance.historical(symbol, queryOptions);
-    
-    const chartData = result.map(day => ({
-      date: day.date.toISOString().split('T')[0],
-      price: day.close
-    }));
-
-    res.status(200).json({ success: true, data: chartData });
-  } catch (error) {
-    console.error(`History fetch error for ${req.params.symbol}:`, error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch chart data" });
-  }
-});
-
-// UPDATE USER PROFILE
-app.put("/api/user/profile", requireAuth, async (req, res) => {
-  try {
-    const { name } = req.body;
-    const userId = req.user._id; 
-
-    if (!name || name.trim() === "") {
-      return res.status(400).json({ success: false, message: "Name cannot be empty." });
-    }
-
-    const updatedUser = await UserModel.findByIdAndUpdate(
-      userId,
-      { $set: { name: name.trim() } },
-      { new: true }
-    );
-
-    if (!updatedUser) {
-      return res.status(404).json({ success: false, message: "User not found" });
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      message: "Name updated successfully!",
-      user: updatedUser 
-    });
-
-  } catch (error) {
-    console.error("Profile Update Error:", error);
-    res.status(500).json({ success: false, message: "Failed to update profile." });
-  }
-});
-
-// GET USER PROFILE DATA
-app.get("/api/user/profile", requireAuth, async (req, res) => {
-  try {
-    const userId = req.user._id; 
-    const user = await UserModel.findById(userId).select("-password");
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: "User not found" });
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      user: {
-        name: user.username || user.name, 
-        email: user.email,
-        virtualFunds: user.virtualFunds
-      } 
-    });
-
-  } catch (error) {
-    console.error("Error fetching user profile:", error);
-    res.status(500).json({ success: false, message: "Failed to load profile data." });
-  }
-});
-
-// GET USER TRADE HISTORY
-app.get("/api/portfolio/orders", requireAuth, async (req, res) => {
-  try {
-    const userId = req.user._id; 
-    const orders = await OrdersModel.find({ user: userId }).sort({ createdAt: -1 });
-
-    if (!orders) {
-      return res.status(404).json({ success: false, message: "No orders found." });
-    }
-
-    res.status(200).json({ success: true, data: orders });
-
-  } catch (error) {
-    console.error("Order History Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch order history." });
   }
 });
 
@@ -553,46 +353,59 @@ app.get("/api/portfolio/pending", requireAuth, async (req, res) => {
   try {
     const pendingOrders = await PendingOrderModel.find({ user: req.user._id }).sort({ createdAt: -1 });
     const enrichedOrders = await Promise.all(pendingOrders.map(async (order) => {
-      let livePrice = 0;
-      try {
-        const quote = await yahooFinance.quote(order.symbol);
-        livePrice = quote.regularMarketPrice;
-
-        if (quote.currency && quote.currency !== 'INR') {
-          const forexQuote = await yahooFinance.quote(`${quote.currency}INR=X`);
-          livePrice = livePrice * forexQuote.regularMarketPrice;
-        }
-      } catch (err) {
-        console.error(`Failed to fetch live price for ${order.symbol}`);
-      }      
-      return { ...order.toObject(), currentPrice: livePrice };
+      const liveData = await fetchLiveQuote(order.symbol);
+      return { ...order.toObject(), currentPrice: liveData.price || 0 };
     }));
-
     res.status(200).json({ success: true, pendingOrders: enrichedOrders });
   } catch (error) {
-    console.error("Fetch Pending Orders Error:", error);
     res.status(500).json({ success: false, message: "Failed to fetch pending orders." });
   }
 });
 
-// CANCEL PENDING ORDER
 app.delete("/api/portfolio/pending/:id", requireAuth, async (req, res) => {
   try {
     const orderId = req.params.id;
-    
     const order = await PendingOrderModel.findOne({ _id: orderId, user: req.user._id });
-    if (!order) {
-      return res.status(404).json({ success: false, message: "Pending order not found or unauthorized." });
-    }
+    if (!order) return res.status(404).json({ success: false, message: "Pending order not found." });
 
     await PendingOrderModel.findByIdAndDelete(orderId);
-
     globalOrderBook.cancelOrder(orderId);
-
-    res.status(200).json({ success: true, message: `Successfully cancelled pending ${order.action} order for ${order.symbol}.` });
+    res.status(200).json({ success: true, message: `Successfully cancelled pending order.` });
   } catch (error) {
-    console.error("Cancel Order Error:", error);
     res.status(500).json({ success: false, message: "Failed to cancel order." });
+  }
+});
+
+app.get("/api/portfolio/orders", requireAuth, async (req, res) => {
+  try {
+    const orders = await OrdersModel.find({ user: req.user._id }).sort({ createdAt: -1 });
+    res.status(200).json({ success: true, data: orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch order history." });
+  }
+});
+
+app.put("/api/user/profile", requireAuth, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || name.trim() === "") return res.status(400).json({ success: false, message: "Name cannot be empty." });
+    
+    const updatedUser = await UserModel.findByIdAndUpdate(req.user._id, { $set: { name: name.trim() } }, { new: true });
+    res.status(200).json({ success: true, message: "Name updated!", user: updatedUser });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to update profile." });
+  }
+});
+
+app.get("/api/user/profile", requireAuth, async (req, res) => {
+  try {
+    const user = await UserModel.findById(req.user._id).select("-password");
+    res.status(200).json({ 
+      success: true, 
+      user: { name: user.username || user.name, email: user.email, virtualFunds: user.virtualFunds } 
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to load profile data." });
   }
 });
 
@@ -601,18 +414,13 @@ const activeSubscriptions = new Set();
 
 io.on("connection", (socket) => {
   console.log(`New Trader Connected: ${socket.id}`);
-
   socket.on("subscribeToStock", (symbol) => {
     socket.join(symbol);
     activeSubscriptions.add(symbol);
-    console.log(`User ${socket.id} joined channel: ${symbol}`);
   });
-
   socket.on("unsubscribeFromStock", (symbol) => {
     socket.leave(symbol);
-    console.log(`User ${socket.id} left channel: ${symbol}`);
   });
-
   socket.on("disconnect", () => {
     console.log(`Trader Disconnected: ${socket.id}`);
   });
@@ -623,38 +431,20 @@ setInterval(async () => {
 
   for (const symbol of activeSubscriptions) {
     const room = io.sockets.adapter.rooms.get(symbol);
-    
     if (room && room.size > 0) {
       try {
-        const liveData = await yahooFinance.quote(symbol); 
-        
-        let finalPrice = liveData.regularMarketPrice;
-        let finalChange = liveData.regularMarketChange;
-
-        if (liveData.currency && liveData.currency !== 'INR') {
-          try {
-            const forexPair = `${liveData.currency}INR=X`; 
-            const forexQuote = await yahooFinance.quote(forexPair);
-            const conversionRate = forexQuote.regularMarketPrice;
-
-            finalPrice = finalPrice * conversionRate;
-            finalChange = finalChange * conversionRate;
-          } catch (err) {
-            console.error("Forex conversion failed for WebSocket.");
-          }
+        const liveData = await fetchLiveQuote(symbol); 
+        if (liveData.price > 0) {
+          console.log(`[REAL STREAM] ${symbol} Broadcast Price: ₹${liveData.price.toFixed(2)}`);
+          await globalOrderBook.match(symbol, liveData.price);
+          io.to(symbol).emit("marketTick", {
+            symbol: symbol,
+            price: liveData.price,
+            change: liveData.change
+          });
         }
-
-        console.log(`[REAL STREAM] ${symbol} Broadcast Price: ₹${finalPrice.toFixed(2)}`);
-        
-        await globalOrderBook.match(symbol, finalPrice);
-        io.to(symbol).emit("marketTick", {
-          symbol: symbol,
-          price: finalPrice,
-          change: finalChange
-        });
-
       } catch (err) {
-        console.error(`WebSocket fetch error for ${symbol}:`, err.message);
+        console.error(`WebSocket fetch error for ${symbol}`);
       }
     } else {
       activeSubscriptions.delete(symbol);
@@ -671,19 +461,17 @@ app.get("/api/market/analyze/:symbol", requireAuth, async (req, res) => {
       return res.status(500).json({ success: false, message: "AI API key missing from server." });
     }
 
-    const quote = await yahooFinance.quote(symbol);
-    
-    if (!quote) {
+    const liveData = await fetchLiveQuote(symbol);
+    if (!liveData || liveData.price === 0) {
       return res.status(404).json({ success: false, message: "Could not fetch data for AI analysis." });
     }
+
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
     const prompt = `
-      You are an expert, professional financial analyst. A user is looking at the stock ${symbol} (${quote.shortName || ''}).
-      Current Price: ${quote.regularMarketPrice} ${quote.currency}.
-      Daily Change: ${quote.regularMarketChangePercent}%.
-      Day High: ${quote.regularMarketDayHigh}.
-      Day Low: ${quote.regularMarketDayLow}.
+      You are an expert, professional financial analyst. A user is looking at the stock ${symbol}.
+      Current Price: ₹${liveData.price}.
+      Daily Change: ${liveData.changePercent.toFixed(2)}%.
       
       Provide a concise, 3-to-4 sentence summary analyzing this current market movement. 
       Mention if the daily trend looks bullish or bearish based on these numbers. 
@@ -692,15 +480,9 @@ app.get("/api/market/analyze/:symbol", requireAuth, async (req, res) => {
     `;
 
     const result = await model.generateContent(prompt);
-    const aiAnalysis = result.response.text();
-
-    res.status(200).json({ 
-      success: true, 
-      analysis: aiAnalysis 
-    });
+    res.status(200).json({ success: true, analysis: result.response.text() });
 
   } catch (error) {
-    console.error(`AI Analysis Error for ${req.params.symbol}:`, error.message);
     res.status(500).json({ success: false, message: "AI Assistant is currently unavailable." });
   }
 });
