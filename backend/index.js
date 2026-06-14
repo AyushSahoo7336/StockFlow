@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import axios from "axios";
-import YahooFinance from 'yahoo-finance2';
+import yahooFinance from 'yahoo-finance2';
 import http from "http";
 import { Server } from "socket.io";
 import { GoogleGenerativeAI } from "@google/generative-ai";
