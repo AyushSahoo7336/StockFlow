@@ -27,7 +27,9 @@ const server = http.createServer(app);
 
 const allowedOrigins = [
   "http://localhost:5173", 
-  "https://stockflow-six-rho.vercel.app"
+  "https://stockflow-six-rho.vercel.app",
+  "https://stock-flow.live",
+  "https://www.stock-flow.live"
 ];
 
 const io = new Server(server, {
