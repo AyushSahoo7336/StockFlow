@@ -1,5 +1,15 @@
 # 📈 StockFlow
 ### Real-Time Trading & Order Execution Engine
+![React](https://img.shields.io/badge/React-Frontend-blue)
+![Node.js](https://img.shields.io/badge/Node.js-Backend-green)
+![MongoDB](https://img.shields.io/badge/MongoDB-Database-brightgreen)
+![Socket.io](https://img.shields.io/badge/Socket.io-WebSockets-black)
+![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-orange)
+![JWT](https://img.shields.io/badge/JWT-Authentication-red)
+![Gemini AI](https://img.shields.io/badge/Gemini-AI-purple)
+![Yahoo Finance](https://img.shields.io/badge/Yahoo_Finance-Live_Data-blueviolet)
+![Priority Queue](https://img.shields.io/badge/Priority_Queue-O(logN)-yellow)
+![Trading Engine](https://img.shields.io/badge/Trading-Engine-success)
 
 A production-ready full-stack virtual stock trading platform that simulates real-world market operations using live stock data, automated limit-order execution, AI-powered market analysis, and real-time portfolio tracking.
 
